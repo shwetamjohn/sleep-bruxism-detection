@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+venv/
+env/
+
+# Data & Models
+*.edf
+*.fif
+data/
+dataset/
+checkpoints/
+*.pth
+*.pt
+sample_output/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
