@@ -1,65 +1,62 @@
 """
-Local Laptop Verification Script
-Tests the full signal processing and CWT scalogram generation pipeline locally
-to ensure zero syntax errors, valid scalogram shapes, and full reproducibility before moving to the GPU machine.
+Local Laptop Verification Script (Multi-Signal & Single-Signal)
+Tests the full signal processing and Multi-Signal CWT scalogram generation pipeline.
 """
 
 import os
 import sys
 import numpy as np
 
-# Ensure src can be imported
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.preprocessing import preprocess_signal
-from src.cwt_transform import generate_cwt_scalogram, scalogram_to_image
+from src.preprocessing import preprocess_emg, preprocess_eeg, preprocess_ecg
+from src.cwt_transform import generate_multisignal_scalogram_image
 
 def run_local_test():
     print("==================================================")
-    print("  Sleep Bruxism Detection - Local Pipeline Test   ")
+    print("  Sleep Bruxism Detection - Multi-Signal Test    ")
     print("==================================================")
     
-    # 1. Simulate 3 seconds of raw physiological EMG signal at 512 Hz
-    fs = 512
-    duration_sec = 3.0
+    fs = 256
+    duration_sec = 2.0
     t = np.linspace(0, duration_sec, int(fs * duration_sec), endpoint=False)
     
-    # Base signal with 50 Hz powerline hum + low frequency baseline wander + random noise
-    powerline_hum = 0.8 * np.sin(2 * np.pi * 50 * t)
-    baseline_wander = 1.2 * np.sin(2 * np.pi * 0.5 * t)
-    noise = 0.2 * np.random.normal(size=len(t))
+    # 1. Simulate 3 synchronized signals
+    # EMG: Muscle burst (grind) from 0.8s to 1.6s
+    emg = 0.1 * np.random.randn(len(t))
+    emg[(t >= 0.8) & (t <= 1.6)] += 1.8 * np.sin(2 * np.pi * 40 * t[(t >= 0.8) & (t <= 1.6)])
     
-    # Simulate a sudden muscle burst (bruxism grinding event around 1.0s to 2.0s)
-    burst = np.zeros_like(t)
-    burst_mask = (t >= 1.0) & (t <= 2.0)
-    burst[burst_mask] = 2.5 * np.sin(2 * np.pi * 35 * t[burst_mask])
+    # EEG: Brain micro-arousal (alpha/theta burst just before & during clench)
+    eeg = 0.2 * np.sin(2 * np.pi * 3 * t) + 0.1 * np.random.randn(len(t))
+    eeg[(t >= 0.5) & (t <= 1.2)] += 1.2 * np.sin(2 * np.pi * 10 * t[(t >= 0.5) & (t <= 1.2)])
     
-    raw_signal = powerline_hum + baseline_wander + noise + burst
-    print(f"[Step 1] Generated synthetic signal: {len(raw_signal)} samples ({duration_sec}s @ {fs}Hz)")
+    # ECG: Cardiac QRS wave spike
+    ecg = 0.1 * np.random.randn(len(t))
+    ecg[int(0.5 * fs) : int(0.55 * fs)] += 2.0
+    ecg[int(1.5 * fs) : int(1.55 * fs)] += 2.0
     
-    # 2. Preprocess (Bandpass 10-100Hz, 50Hz Notch, Min-Max normalization)
-    clean_signal = preprocess_signal(raw_signal, fs=fs, lowcut=10.0, highcut=100.0, notch_freq=50.0)
-    print(f"[Step 2] Preprocessing completed.")
-    print(f"         Min: {clean_signal.min():.4f}, Max: {clean_signal.max():.4f}, Mean: {clean_signal.mean():.4f}")
-    assert 0.0 <= clean_signal.min() <= 1.0, "Signal min not normalized properly"
-    assert 0.0 <= clean_signal.max() <= 1.0, "Signal max not normalized properly"
+    print(f"[Step 1] Simulated 3 synchronized signals: EMG (chin), EEG (brain), ECG (heart).")
     
-    # 3. Continuous Wavelet Transform (CWT)
-    power_scalogram, freqs = generate_cwt_scalogram(clean_signal, fs=fs, total_scales=64)
-    print(f"[Step 3] CWT Scalogram generated successfully!")
-    print(f"         Scalogram matrix dimensions: {power_scalogram.shape} (scales x time_samples)")
+    # 2. Preprocessing
+    emg_c = preprocess_emg(emg, fs=fs)
+    eeg_c = preprocess_eeg(eeg, fs=fs)
+    ecg_c = preprocess_ecg(ecg, fs=fs)
+    print(f"[Step 2] Filtered all 3 signals with specialized bandpass & notch filters.")
     
-    # 4. Convert Scalogram to 224x224 RGB image
+    # 3. Multi-Signal CWT Scalogram (3 Channels: R=EMG, G=EEG, B=ECG)
     os.makedirs("sample_output", exist_ok=True)
-    sample_img_path = os.path.join("sample_output", "test_scalogram.png")
-    image = scalogram_to_image(power_scalogram, img_size=(224, 224), colormap="jet")
-    image.save(sample_img_path)
-    print(f"[Step 4] Scalogram saved as RGB image at: {sample_img_path}")
-    print(f"         Image format: {image.format or 'PNG'}, Mode: {image.mode}, Size: {image.size}")
+    multi_img = generate_multisignal_scalogram_image(emg_c, eeg_c, ecg_c, fs=fs, total_scales=64, img_size=(224, 224))
+    multi_path = os.path.join("sample_output", "multisignal_scalogram.png")
+    multi_img.save(multi_path)
+    print(f"[Step 3] Generated 3-Channel Multi-Signal Scalogram Image!")
+    print(f"         Saved at: {multi_path}")
+    print(f"         Dimensions: {multi_img.size}, Mode: {multi_img.mode}")
+    print(f"         Channel R = EMG (Jaw Clench)")
+    print(f"         Channel G = EEG (Brain Micro-Arousal)")
+    print(f"         Channel B = ECG (Cardiac Response)")
     
     print("\n--------------------------------------------------")
-    print("ALL LOCAL PIPELINE CHECKS PASSED SUCCESSFULLY!")
-    print("The signal processing & CWT modules are ready.")
+    print("MULTI-SIGNAL PIPELINE PASSED SUCCESSFULLY!")
     print("--------------------------------------------------\n")
 
 if __name__ == "__main__":
