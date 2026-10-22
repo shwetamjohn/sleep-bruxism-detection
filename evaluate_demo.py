@@ -39,7 +39,10 @@ def run_demo(data_dir="data/dataset", checkpoint="checkpoints/best_model.pth", m
     print(f"Loading {model_name} from checkpoint: {checkpoint}...")
     model = build_model(model_name=model_name, num_classes=2, pretrained=False)
     if os.path.exists(checkpoint):
-        model.load_state_dict(torch.load(checkpoint, map_location=device))
+        try:
+            model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
+        except TypeError:
+            model.load_state_dict(torch.load(checkpoint, map_location=device))
         print("Checkpoint loaded successfully!")
     else:
         print(f"Warning: Checkpoint file '{checkpoint}' not found. Using untrained weights for demonstration.")
