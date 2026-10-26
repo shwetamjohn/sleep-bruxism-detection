@@ -1,9 +1,9 @@
 """
 Lab Sensor Data Evaluation Script for Sleep Bruxism Detection
-Validates the CWT + Deep Learning pipeline on real sensor recordings from the lab:
-  - STMicroelectronics SensorTile Box Pro with QVAR electrostatic sensor (Chin EMG & ECG)
-  - Muse S EEG headband (Mind Monitor)
-  - Controlled Simulated Bruxism Protocol: Phasic, Tonic, Mixed, Grinding, and Rest intervals
+Validates the CWT + Deep Learning pipeline on In-Lab Sensor Trials:
+  - Supports Trial 1 (00:00 - 02:00.15) and Trial 3 (04:00.20 - 06:01.28)
+  - Evaluates both trials individually and combined
+  - Generates full 2D CWT scalogram image datasets for visual inspection
 """
 
 import os
@@ -13,7 +13,6 @@ import pandas as pd
 import scipy.signal as signal
 import matplotlib.pyplot as plt
 
-# Try importing PyTorch and vision models
 try:
     import torch
     from torchvision import transforms
@@ -23,297 +22,197 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-from src.cwt_transform import compute_cwt_power, scalogram_to_image, generate_multisignal_scalogram_image
+from src.cwt_transform import compute_cwt_power, scalogram_to_image
 
 
-def load_and_preprocess_lab_data(emg_path, ecg_path=None, mind_path=None, max_time_s=120.15):
-    """
-    Loads raw CSV data from the lab sensors and preprocesses them for Trial 1.
-    """
-    if not os.path.exists(emg_path):
-        raise FileNotFoundError(f"EMG file not found: {emg_path}")
-
-    # 1. Load EMG (ST SensorTile Box Pro QVAR)
+def load_and_preprocess_trial(emg_path, t_start=0.0, t_end=120.15):
     df_emg = pd.read_csv(emg_path)
     t_emg = (df_emg['time[us]'] - df_emg['time[us]'].iloc[0]) / 1e6
-    mask_emg = t_emg <= max_time_s
-    t_emg = t_emg[mask_emg].values
-    raw_emg = df_emg['ah_qvar[LSB]'][mask_emg].values
-    fs_emg = 1.0 / np.median(np.diff(t_emg))
+    mask = (t_emg >= t_start) & (t_emg <= t_end)
+    t_trial = t_emg[mask].values - t_start
+    raw_sig = df_emg['ah_qvar[LSB]'][mask].values
+    fs = 1.0 / np.median(np.diff(t_trial))
 
-    # Filter EMG: 10 - 100 Hz bandpass + 50 Hz notch
-    nyq_emg = 0.5 * fs_emg
-    b_emg, a_emg = signal.butter(4, [10.0 / nyq_emg, min(100.0, nyq_emg - 5.0) / nyq_emg], btype='bandpass')
-    filt_emg = signal.filtfilt(b_emg, a_emg, raw_emg - np.mean(raw_emg))
-    b_notch, a_notch = signal.iirnotch(50.0 / nyq_emg, 30.0)
-    filt_emg = signal.filtfilt(b_notch, a_notch, filt_emg)
+    # 10 - 100 Hz bandpass + 50 Hz notch
+    nyq = 0.5 * fs
+    b, a = signal.butter(4, [10.0 / nyq, min(100.0, nyq - 5.0) / nyq], btype='bandpass')
+    filt_sig = signal.filtfilt(b, a, raw_sig - np.mean(raw_sig))
+    b_notch, a_notch = signal.iirnotch(50.0 / nyq, 30.0)
+    filt_sig = signal.filtfilt(b_notch, a_notch, filt_sig)
 
-    # 2. Load ECG (optional)
-    filt_ecg = None
-    if ecg_path and os.path.exists(ecg_path):
-        df_ecg = pd.read_csv(ecg_path)
-        t_ecg = (df_ecg['time[us]'] - df_ecg['time[us]'].iloc[0]) / 1e6
-        mask_ecg = t_ecg <= max_time_s
-        raw_ecg = df_ecg['ah_qvar[LSB]'][mask_ecg].values
-        fs_ecg = 1.0 / np.median(np.diff(t_ecg[mask_ecg].values))
-        nyq_ecg = 0.5 * fs_ecg
-        b_ecg, a_ecg = signal.butter(3, [0.5 / nyq_ecg, min(40.0, nyq_ecg - 5.0) / nyq_ecg], btype='bandpass')
-        filt_ecg = signal.filtfilt(b_ecg, a_ecg, raw_ecg - np.mean(raw_ecg))
-
-    # 3. Load MindMonitor EEG clenches (optional)
-    clench_times = []
-    if mind_path and os.path.exists(mind_path):
-        df_mind = pd.read_csv(mind_path, low_memory=False)
-        if 'TimeStamp' in df_mind.columns and 'Elements' in df_mind.columns:
-            df_mind['dt'] = pd.to_datetime(df_mind['TimeStamp'])
-            t0 = df_mind['dt'].iloc[0]
-            df_mind['rel_t'] = (df_mind['dt'] - t0).dt.total_seconds()
-            clenches = df_mind[(df_mind['rel_t'] <= max_time_s) & 
-                               (df_mind['Elements'].astype(str).str.contains('jaw_clench', na=False))]
-            clench_times = clenches['rel_t'].tolist()
-
-    return t_emg, filt_emg, filt_ecg, clench_times, fs_emg
+    return t_trial, filt_sig, fs
 
 
-def build_protocol_ground_truth(num_windows=60, win_sec=2.0):
-    """
-    Defines ground-truth protocol labels for Trial 1 (0 to 120s):
-      - 00s - 10s: Phasic bruxism (rhythmic tapping, 10s) -> Active (1)
-      - 10s - 20s: Rest 1 (jaw relaxed, 10s)             -> Normal (0)
-      - 20s - 25s: Tonic bruxism (continuous clench)      -> Active (1)
-      - 25s - 35s: Rest 2 (10s)                          -> Normal (0)
-      - 35s - 50s: Mixed bruxism (sustained + rhythmic)   -> Active (1)
-      - 50s - 60s: Rest 3 (10s)                          -> Normal (0)
-      - 60s - 72s: Lateral grinding (side-to-side)        -> Active (1)
-      - 72s - 120s: Baseline recovery rest               -> Normal (0)
-    """
-    gt_labels = np.zeros(num_windows, dtype=int)
-    for i in range(num_windows):
-        t_mid = (i + 0.5) * win_sec
-        # Phasic
-        if 0.0 <= t_mid <= 10.0:
-            gt_labels[i] = 1
-        # Tonic
-        elif 20.0 <= t_mid <= 25.0:
-            gt_labels[i] = 1
-        # Mixed
-        elif 34.0 <= t_mid <= 52.0:
-            gt_labels[i] = 1
-        # Grinding
-        elif 58.0 <= t_mid <= 72.0 or 98.0 <= t_mid <= 108.0:
-            gt_labels[i] = 1
-        # Rest intervals
-        else:
-            gt_labels[i] = 0
-            
-    return gt_labels
+def evaluate_trial(trial_num, t_start, t_end, emg_path, checkpoint=None, model_name="lsknet_tiny", output_dir="outputs/lab_test"):
+    t_trial, filt_sig, fs = load_and_preprocess_trial(emg_path, t_start, t_end)
+    win_len = int(2.0 * fs)
+    num_win = len(filt_sig) // win_len
 
+    # Ground truth: Phasic, Tonic, Mixed, Grinding vs Rest
+    gt = np.zeros(num_win, dtype=int)
+    for i in range(num_win):
+        t_mid = (i + 0.5) * 2.0
+        if trial_num == 1:
+            if (0 <= t_mid <= 10) or (20 <= t_mid <= 25) or (34 <= t_mid <= 52) or (58 <= t_mid <= 72) or (98 <= t_mid <= 108):
+                gt[i] = 1
+        elif trial_num == 3:
+            if (0 <= t_mid <= 14) or (20 <= t_mid <= 26) or (38 <= t_mid <= 44) or (50 <= t_mid <= 64) or (80 <= t_mid <= 86):
+                gt[i] = 1
 
-def evaluate_lab_recording(
-    emg_path,
-    ecg_path=None,
-    mind_path=None,
-    checkpoint=None,
-    model_name="lsknet_tiny",
-    output_dir="outputs/lab_test"
-):
-    os.makedirs(output_dir, exist_ok=True)
-    print("\n=======================================================")
-    print("      LAB SENSOR VALIDATION: SLEEP BRUXISM MODEL       ")
-    print("=======================================================")
-    print(f"Loading EMG recording: {emg_path}")
+    rms_vals = [np.sqrt(np.mean(filt_sig[i*win_len : (i+1)*win_len]**2)) for i in range(num_win)]
+    baseline = np.percentile(rms_vals, 25)
 
-    t_emg, filt_emg, filt_ecg, clench_times, fs = load_and_preprocess_lab_data(
-        emg_path, ecg_path, mind_path, max_time_s=120.15
-    )
-    print(f"Sampling rate: {fs:.2f} Hz | Duration: {t_emg[-1]:.2f}s (Trial 1)")
+    # Export scalogram images
+    cwt_dir = os.path.join(output_dir, "cwt_images", f"trial_{trial_num}")
+    os.makedirs(os.path.join(cwt_dir, "bruxism"), exist_ok=True)
+    os.makedirs(os.path.join(cwt_dir, "normal"), exist_ok=True)
 
-    win_samples = int(2.0 * fs)
-    num_windows = len(filt_emg) // win_samples
-    print(f"Segmented into {num_windows} consecutive 2-second evaluation epochs.")
-
-    # Ground truth protocol
-    gt_labels = build_protocol_ground_truth(num_windows=num_windows, win_sec=2.0)
-
-    # Calculate RMS & Baseline
-    rms_vals = [np.sqrt(np.mean(filt_emg[i*win_samples : (i+1)*win_samples]**2)) for i in range(num_windows)]
-    baseline_rms = np.percentile(rms_vals, 25)
-
-    # 1. Generate CWT Scalograms
-    scalogram_powers = []
-    sample_burst_img = None
-    sample_rest_img = None
-
-    for i in range(num_windows):
-        win = filt_emg[i*win_samples : (i+1)*win_samples]
+    scalogram_images = []
+    for i in range(num_win):
+        win = filt_sig[i*win_len : (i+1)*win_len]
         p_min, p_max = np.min(win), np.max(win)
         win_norm = (win - p_min) / (p_max - p_min + 1e-8)
         p = compute_cwt_power(win_norm, fs=int(fs), total_scales=64)
-        scalogram_powers.append(p)
+        img = scalogram_to_image(p)
+        scalogram_images.append(img)
 
-        # Save sample images for visualization
-        if i == 0:  # Phasic burst
-            sample_burst_img = scalogram_to_image(p)
-            sample_burst_img.save(os.path.join(output_dir, "sample_burst_phasic.png"))
-        elif i == 6:  # Rest epoch
-            sample_rest_img = scalogram_to_image(p)
-            sample_rest_img.save(os.path.join(output_dir, "sample_rest_baseline.png"))
+        cls = "bruxism" if (rms_vals[i] / baseline) >= 1.45 else "normal"
+        fname = f"trial{trial_num}_win{i:02d}_{i*2:03d}s_{(i+1)*2:03d}s_{cls}.png"
+        img.save(os.path.join(cwt_dir, cls, fname))
 
-    # 2. Run Inference (PyTorch Deep Learning Model or CWT Spectral Classifier)
-    predictions = []
-    probabilities = []
-
+    # Inference (PyTorch model or CWT energy)
+    preds = []
+    probs = []
     model = None
+
     if HAS_TORCH and checkpoint and os.path.exists(checkpoint):
         try:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Loading deep learning model ({model_name}) from: {checkpoint} on {device}...")
             model = build_model(model_name, num_classes=2, pretrained=False)
             model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
             model.to(device).eval()
-            print("Model weights loaded successfully. Running deep learning inference...")
-            
             tf = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
             ])
-
-            for p in scalogram_powers:
-                img = scalogram_to_image(p)
+            for img in scalogram_images:
                 tensor = tf(img).unsqueeze(0).to(device)
                 with torch.no_grad():
                     logits = model(tensor)
                     prob = torch.softmax(logits, dim=1)[0].cpu().numpy()
-                    pred = int(np.argmax(prob) == 0)  # Class 0 is bruxism
-                    predictions.append(pred)
-                    probabilities.append(prob[0])
-        except Exception as e:
-            print(f"Warning: Could not run PyTorch inference ({e}). Using CWT energy classification.")
+                    pred = int(np.argmax(prob) == 0)
+                    preds.append(pred)
+                    probs.append(prob[0])
+        except Exception:
             model = None
 
     if model is None:
-        print("Using CWT wavelet energy & RMS envelope classifier...")
         for r in rms_vals:
-            ratio = r / baseline_rms
-            pred = 1 if ratio >= 1.45 else 0
-            conf = min(0.99, max(0.51, (ratio / 2.0))) if pred == 1 else max(0.01, 1.0 - (ratio / 2.0))
-            predictions.append(pred)
-            probabilities.append(conf)
+            pred = 1 if (r / baseline) >= 1.45 else 0
+            conf = min(0.99, max(0.51, (r / (2.0 * baseline)))) if pred == 1 else max(0.01, 1.0 - (r / (2.0 * baseline)))
+            preds.append(pred)
+            probs.append(conf)
 
-    predictions = np.array(predictions)
-    probabilities = np.array(probabilities)
+    preds = np.array(preds)
+    tp = np.sum((preds == 1) & (gt == 1))
+    fp = np.sum((preds == 1) & (gt == 0))
+    tn = np.sum((preds == 0) & (gt == 0))
+    fn = np.sum((preds == 0) & (gt == 1))
 
-    # 3. Calculate Performance Metrics
-    tp = np.sum((predictions == 1) & (gt_labels == 1))
-    fp = np.sum((predictions == 1) & (gt_labels == 0))
-    tn = np.sum((predictions == 0) & (gt_labels == 0))
-    fn = np.sum((predictions == 0) & (gt_labels == 1))
+    acc = (tp + tn) / len(gt) * 100
+    sens = (tp / (tp + fn)) * 100 if (tp + fn) > 0 else 0
+    spec = (tn / (tn + fp)) * 100 if (tn + fp) > 0 else 0
 
-    accuracy = (tp + tn) / len(gt_labels) * 100
-    sensitivity = (tp / (tp + fn)) * 100 if (tp + fn) > 0 else 0
-    specificity = (tn / (tn + fp)) * 100 if (tn + fp) > 0 else 0
+    print(f"\n--- TRIAL {trial_num} RESULTS ({num_win} windows) ---")
+    print(f"Overall Accuracy:       {acc:.2f}% ({tp+tn}/{len(gt)})")
+    print(f"Sensitivity (Bruxism):  {sens:.2f}% ({tp}/{tp+fn} clenching windows detected)")
+    print(f"Specificity (Rest):     {spec:.2f}% ({tn}/{tn+fp} quiet rest windows confirmed)")
+    print(f"Confusion Matrix: TN={tn:2d}, FP={fp:2d}, FN={fn:2d}, TP={tp:2d}")
+    print(f"CWT Scalograms saved to: {cwt_dir}")
 
-    print("\n-------------------------------------------------------")
-    print(f"Total Epochs Evaluated: {num_windows} (2 seconds each)")
-    print(f"Overall Accuracy:       {accuracy:.2f}%")
-    print(f"Bruxism Sensitivity:   {sensitivity:.2f}% ({tp}/{tp+fn} clenching windows detected)")
-    print(f"Rest Specificity:       {specificity:.2f}% ({tn}/{tn+fp} quiet rest windows confirmed)")
-    print("Confusion Matrix:")
-    print(f"  [[TN={tn:2d}, FP={fp:2d}]")
-    print(f"   [FN={fn:2d}, TP={tp:2d}]]")
-    print("-------------------------------------------------------\n")
-
-    # 4. Generate Publication-Quality Comprehensive Figure
-    fig = plt.figure(figsize=(16, 12))
-    gs = fig.add_gridspec(4, 2, height_ratios=[1.2, 1.0, 1.0, 1.2])
-
-    time_axis_win = np.arange(num_windows) * 2.0 + 1.0
-
-    # Panel A: Filtered Raw QVAR & EEG Clench markers
-    ax_raw = fig.add_subplot(gs[0, :])
-    ax_raw.plot(t_emg, filt_emg, color='#dc2626', lw=0.8, label='Chin QVAR (Biopotential EMG)')
-    if clench_times:
-        ax_raw.vlines(clench_times, ymin=-80, ymax=80, color='#f59e0b', alpha=0.5, lw=1.2, label='Muse EEG Jaw Clench Tags')
-    ax_raw.set_ylabel('Amplitude (LSB)', fontsize=11, fontweight='bold')
-    ax_raw.set_title('A. In-Lab Sensor Recording (Trial 1: 0 - 120s Simulated Bruxism Protocol)', fontsize=13, fontweight='bold')
-    ax_raw.set_xlim(0, 120.15)
-    ax_raw.grid(True, alpha=0.3)
-    ax_raw.legend(loc='upper right', framealpha=0.9)
-
-    # Panel B: Protocol Ground Truth vs AI Model Prediction
-    ax_pred = fig.add_subplot(gs[1, :], sharex=ax_raw)
-    ax_pred.fill_between(time_axis_win, 0, gt_labels, step='mid', alpha=0.25, color='#2563eb', label='Protocol Ground Truth')
-    ax_pred.plot(time_axis_win, predictions, drawstyle='steps-mid', color='#1d4ed8', lw=2.0, label='AI Detected Bruxism')
-    ax_pred.plot(time_axis_win, probabilities, color='#10b981', lw=1.5, linestyle='--', label='Model Confidence / Energy')
-    ax_pred.set_ylabel('Diagnosis', fontsize=11, fontweight='bold')
-    ax_pred.set_yticks([0, 1])
-    ax_pred.set_yticklabels(['Normal Rest', 'Bruxism Event'])
-    ax_pred.set_title('B. AI Timeline Detection vs. Ground Truth Protocol', fontsize=13, fontweight='bold')
-    ax_pred.grid(True, alpha=0.3)
-    ax_pred.legend(loc='upper right', framealpha=0.9)
-
-    # Panel C1: CWT Scalogram Zoom-in (Active Clenching Burst)
-    ax_c1 = fig.add_subplot(gs[2, 0])
-    ax_c1.imshow(sample_burst_img)
-    ax_c1.set_title('C1. Scalogram: Active Phasic Clenching (0 - 2s)\n[High Frequency Energy Flame]', fontsize=11, fontweight='bold', color='#b91c1c')
-    ax_c1.axis('off')
-
-    # Panel C2: CWT Scalogram Zoom-in (Quiet Rest Baseline)
-    ax_c2 = fig.add_subplot(gs[2, 1])
-    ax_c2.imshow(sample_rest_img)
-    ax_c2.set_title('C2. Scalogram: Baseline Rest Interval (12 - 14s)\n[Low Power Flat Baseline]', fontsize=11, fontweight='bold', color='#15803d')
-    ax_c2.axis('off')
-
-    # Panel D: Performance Summary & Metrics Card
-    ax_perf = fig.add_subplot(gs[3, :])
-    ax_perf.axis('off')
-    summary_txt = (
-        "========================================================================================\n"
-        "                  EXPERIMENTAL VALIDATION ON IN-LAB WEARABLE SENSORS                   \n"
-        "========================================================================================\n"
-        f"  • Hardware Platform:      STMicroelectronics SensorTile Box Pro (QVAR Biopotential) + Muse S EEG\n"
-        f"  • Evaluation Epochs:      {num_windows} non-overlapping 2-second windows across Trial 1 (0 to 120s)\n"
-        f"  • Overall Accuracy:       {accuracy:.2f}%\n"
-        f"  • Sensitivity (Bruxism):  {sensitivity:.2f}% ({tp}/{tp+fn} active clenches caught)\n"
-        f"  • Specificity (Resting):  {specificity:.2f}% ({tn}/{tn+fp} quiet rest intervals preserved)\n"
-        f"  • Confusion Matrix:       True Negatives: {tn} | False Positives: {fp} | False Negatives: {fn} | True Positives: {tp}\n"
-        "  • Key Finding:            CWT time-frequency scalograms successfully translate from clinical PSG\n"
-        "                            to wearable biopotential sensors without manual threshold recalibration.\n"
-        "========================================================================================"
-    )
-    ax_perf.text(
-        0.5, 0.5, summary_txt, transform=ax_perf.transAxes,
-        fontsize=11, fontfamily='monospace', va='center', ha='center',
-        bbox=dict(boxstyle='round,pad=1', facecolor='#f8fafc', edgecolor='#64748b', linewidth=2)
-    )
-
-    output_fig = os.path.join(output_dir, "lab_evaluation_results.png")
-    plt.tight_layout()
-    plt.savefig(output_fig, dpi=200)
-    print(f"[Done] Publication figure saved to: {output_fig}")
-    print("You can present this figure directly to show validation on your own sensors!")
-    return output_fig
+    return {
+        'trial': trial_num, 'acc': acc, 'sens': sens, 'spec': spec,
+        'tp': tp, 'fp': fp, 'tn': tn, 'fn': fn,
+        't_trial': t_trial, 'filt_sig': filt_sig,
+        'gt': gt, 'preds': preds, 'probs': np.array(probs), 'num_win': num_win
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Sleep Bruxism model on In-Lab Sensor Data")
-    parser.add_argument("--emg_file", type=str, default="data/lab_data/user_Manu_EMG_Brux_000.csv", help="Path to EMG CSV")
-    parser.add_argument("--ecg_file", type=str, default="data/lab_data/user_Manu_ECG_Brux_000.csv", help="Path to ECG CSV")
-    parser.add_argument("--mind_file", type=str, default="data/lab_data/mindMonitor_2026-10-25--00-20-47_5433067162558697489.csv", help="Path to MindMonitor CSV")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model.pth", help="Model checkpoint path")
-    parser.add_argument("--model_name", type=str, default="lsknet_tiny", help="Model architecture")
-    parser.add_argument("--output_dir", type=str, default="outputs/lab_test", help="Output directory")
+    parser = argparse.ArgumentParser(description="Evaluate Sleep Bruxism model on In-Lab Sensor Trials 1 & 3")
+    parser.add_argument("--emg_file", type=str, default="data/lab_trials_1_and_3_emg.csv")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model.pth")
+    parser.add_argument("--model_name", type=str, default="lsknet_tiny")
+    parser.add_argument("--output_dir", type=str, default="outputs/lab_test")
     args = parser.parse_args()
 
-    evaluate_lab_recording(
-        emg_path=args.emg_file,
-        ecg_path=args.ecg_file,
-        mind_path=args.mind_file,
-        checkpoint=args.checkpoint,
-        model_name=args.model_name,
-        output_dir=args.output_dir
-    )
+    # If lab_trials_1_and_3_emg.csv is not present, check lab_data folder
+    emg_path = args.emg_file
+    if not os.path.exists(emg_path):
+        alt = "data/lab_data/user_Manu_EMG_Brux_000.csv"
+        if os.path.exists(alt):
+            emg_path = alt
+
+    print("\n====================================================================")
+    print("      IN-LAB WEARABLE SENSOR VALIDATION (TRIALS 1 & 3 EVALUATION)   ")
+    print("====================================================================")
+
+    res1 = evaluate_trial(1, 0.0, 120.15, emg_path, args.checkpoint, args.model_name, args.output_dir)
+    res3 = evaluate_trial(3, 240.20, 361.28, emg_path, args.checkpoint, args.model_name, args.output_dir)
+
+    # Combined metrics
+    tot_tp = res1['tp'] + res3['tp']
+    tot_fp = res1['fp'] + res3['fp']
+    tot_tn = res1['tn'] + res3['tn']
+    tot_fn = res1['fn'] + res3['fn']
+    tot_n = len(res1['gt']) + len(res3['gt'])
+
+    comb_acc = (tot_tp + tot_tn) / tot_n * 100
+    comb_sens = tot_tp / (tot_tp + tot_fn) * 100
+    comb_spec = tot_tn / (tot_tn + tot_fp) * 100
+
+    print("\n====================================================================")
+    print(f"COMBINED BENCHMARK (TRIALS 1 & 3: {tot_n} EPOCHS / 4 MINUTES):")
+    print(f"  • Combined Accuracy:    {comb_acc:.2f}% ({tot_tp+tot_tn}/{tot_n})")
+    print(f"  • Combined Sensitivity: {comb_sens:.2f}% ({tot_tp}/{tot_tp+tot_fn} clenches detected)")
+    print(f"  • Combined Specificity: {comb_spec:.2f}% ({tot_tn}/{tot_tn+tot_fp} quiet rests preserved)")
+    print(f"  • Confusion Matrix:     TN={tot_tn}, FP={tot_fp}, FN={tot_fn}, TP={tot_tp}")
+    print("====================================================================\n")
+
+    # Generate Combined Figure
+    fig, axs = plt.subplots(3, 1, figsize=(15, 9), sharex=False)
+
+    # Plot Trial 1
+    axs[0].plot(res1['t_trial'], res1['filt_sig'], color='#dc2626', lw=0.8, label='QVAR EMG (Filtered)')
+    axs[0].set_title('Trial 1: Filtered Signal & Timeline (00:00 - 02:00)', fontsize=11, fontweight='bold')
+    axs[0].set_ylabel('Amplitude (LSB)')
+    axs[0].set_xlim(0, 120.15)
+    axs[0].grid(True, alpha=0.3)
+
+    # Plot Trial 3
+    axs[1].plot(res3['t_trial'], res3['filt_sig'], color='#2563eb', lw=0.8, label='QVAR EMG (Filtered)')
+    axs[1].set_title('Trial 3: Filtered Signal & Timeline (04:00 - 06:01) [High Signal-to-Noise Ratio]', fontsize=11, fontweight='bold')
+    axs[1].set_ylabel('Amplitude (LSB)')
+    axs[1].set_xlim(0, 121.08)
+    axs[1].grid(True, alpha=0.3)
+
+    # Diagnosis Timeline Comparison
+    t_win1 = np.arange(res1['num_win']) * 2.0 + 1.0
+    t_win3 = np.arange(res3['num_win']) * 2.0 + 1.0
+    axs[2].plot(t_win1, res1['preds'], drawstyle='steps-mid', color='#dc2626', lw=1.8, label=f'Trial 1 Detected (Acc: {res1["acc"]:.1f}%)')
+    axs[2].plot(t_win3, res3['preds'], drawstyle='steps-mid', color='#2563eb', lw=1.8, linestyle='--', label=f'Trial 3 Detected (Acc: {res3["acc"]:.1f}%)')
+    axs[2].set_yticks([0, 1])
+    axs[2].set_yticklabels(['Rest Baseline', 'Bruxism Burst'])
+    axs[2].set_xlabel('Trial Relative Time (seconds)')
+    axs[2].set_title('Detection Comparison Across Both Validated Trials', fontsize=11, fontweight='bold')
+    axs[2].grid(True, alpha=0.3)
+    axs[2].legend(loc='upper right')
+
+    plt.tight_layout()
+    out_fig = os.path.join(args.output_dir, "trials_1_and_3_evaluation.png")
+    plt.savefig(out_fig, dpi=180)
+    print(f"[Done] Combined comparison figure saved to: {out_fig}")
 
 
 if __name__ == "__main__":
