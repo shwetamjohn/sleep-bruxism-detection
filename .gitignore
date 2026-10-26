@@ -10,8 +10,8 @@ env/
 # Data & Models
 *.edf
 *.fif
-data/
-dataset/
+data/raw_edf/
+data/dataset/
 checkpoints/
 *.pth
 *.pt
