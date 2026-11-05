@@ -1,93 +1,68 @@
-# 🌙 Sleep Bruxism Detection: Multimodal CWT Scalograms & LSKNet
+# 🌙 Sleep Bruxism Detection
 
-An end-to-end biomedical deep learning pipeline for automated detection of **Sleep Bruxism (nocturnal tooth grinding and jaw clenching)** from physiological signals. 
-
-This project formulates biosignal analysis as a computer vision problem: 1D physiological time-series signals are preprocessed, decomposed into 2D time-frequency scalograms via **Continuous Wavelet Transform (CWT)**, and classified using **Large Selective Kernel Networks (LSKNet)** with dynamic multi-scale receptive fields.
+> **Automated detection of nocturnal teeth grinding and jaw clenching using biosignals, Continuous Wavelet Transform (CWT), and Vision Deep Learning (LSKNet).**
 
 ---
 
-## 📌 Clinical Motivation & Core Innovation
+## 📌 Overview
 
-Sleep Bruxism (SB) is a masticatory muscle movement disorder causing severe dental attrition, temporomandibular joint (TMJ) dysfunction, and morning headaches. Standard polysomnography (PSG) diagnosis requires manual scoring by somnologists, which is expensive, labor-intensive, and inaccessible for longitudinal monitoring.
+**Sleep Bruxism (SB)** is an involuntary sleep movement disorder involving teeth grinding and jaw clenching. It frequently leads to severe tooth wear, jaw muscle pain (TMJ disorders), and morning headaches.
 
-### Key Contributions:
-1. **Wavelet Vision Representation:** Converts raw non-stationary voltage waveforms into 2D Time-Frequency Scalograms (Complex Morlet CWT), capturing both localized high-frequency clenching bursts and background baseline power.
-2. **Native PyTorch LSKNet:** Implements the official Large Selective Kernel Network (ICCV 2023) in pure PyTorch with $5 \times 5$ depthwise and $7 \times 7$ dilated depthwise convolutions and spatial selection gating to adaptively detect variable-duration bursts (phasic taps vs. sustained tonic grinds).
-3. **Cross-Domain Hardware Validation:** Evaluated both on gold-standard clinical polysomnography (CAP Sleep Database) and on **our own proprietary in-lab wearable sensor recordings** (STMicroelectronics SensorTile Box Pro with QVAR electrostatic sensor + Muse S EEG).
+Traditional diagnosis requires an overnight clinical sleep study (Polysomnography) where doctors manually inspect hours of recorded muscle signals. This project automates the diagnosis by:
+1. Converting 1D muscle and sensor signals into **2D color-mapped time-frequency images (scalograms)**.
+2. Using a computer vision model (**LSKNet**) to automatically detect grinding and clenching episodes.
+3. Validating the pipeline on both **hospital sleep records** and **portable wearable sensors**.
 
 ---
 
-## 🔬 System Pipeline Architecture
+## ⚙️ How It Works (Pipeline)
 
 ```
-                      BIOMEDICAL SIGNAL ACQUISITION
-        ┌─────────────────────────────────────────────────────────┐
-        │  • Clinical PSG: Chin Submental EMG (CAP Sleep Database)│
-        │  • In-Lab Sensors: ST SensorTile QVAR (EMG/ECG) + Muse  │
-        └────────────────────────────┬────────────────────────────┘
-                                     │
-                                     ▼
-                      PREPROCESSING & FILTERING
-        ┌─────────────────────────────────────────────────────────┐
-        │  • 4th-order Butterworth Bandpass (10 Hz – 100 Hz)     │
-        │  • 50 Hz Notch Filter (Powerline artifact suppression)  │
-        │  • Sliding 2-Second Temporal Epoch Segmentation         │
-        └────────────────────────────┬────────────────────────────┘
-                                     │
-                                     ▼
-                   FEATURE EXTRACTION (2D CWT SCALOGRAMS)
-        ┌─────────────────────────────────────────────────────────┐
-        │  • Continuous Wavelet Transform (cmor1.5-1.0)           │
-        │  • 224 × 224 Color-mapped Time-Frequency Images        │
-        │  • Red/Jet: High-energy clenching burst flare           │
-        │  • Blue/Dark: Quiet restful baseline sleep              │
-        └────────────────────────────┬────────────────────────────┘
-                                     │
-                                     ▼
-                   DEEP LEARNING CLASSIFIER (LSKNet)
-        ┌─────────────────────────────────────────────────────────┐
-        │  • Dynamic Selective Kernels (5×5 Local + 7×7 Dilated)  │
-        │  • Adaptive Receptive Fields + Spatial Gating           │
-        │  • Output: Binary Classification [BRUXISM vs. NORMAL]   │
-        └─────────────────────────────────────────────────────────┘
+[ 1. Sensor Signals ]  ──►  [ 2. Filter & Slice ]  ──►  [ 3. Heatmap Images ]  ──►  [ 4. Vision AI ]  ──►  [ 5. Decision ]
+  Chin EMG / Wearable       10-100 Hz Bandpass           Wavelet Transform           LSKNet Model          Bruxism vs Normal
+  Sensors (240-512 Hz)      50 Hz Notch (2s chunks)       (2D CWT Scalograms)       (Selective Kernels)      (Real-time output)
 ```
+
+1. **Signal Input:** Reads muscle activity from clinical chin EMG or wearable biopotential sensors.
+2. **Noise Cleaning & Slicing:** A bandpass filter (10–100 Hz) and a 50 Hz notch filter remove motion noise and electrical powerline hum. The continuous signal is then sliced into **2-second windows**.
+3. **Wavelet Heatmaps (CWT):** Continuous Wavelet Transform converts each 2-second slice into a $224 \times 224$ time-frequency image:
+   - **Bright red/orange flares:** High-energy clenches and grinding bursts.
+   - **Cool blue/dark areas:** Quiet, relaxed baseline sleep.
+4. **AI Classification (LSKNet):** A Large Selective Kernel Network scans the heatmap to spot both brief tapping clenches (phasic) and sustained grinds (tonic).
+5. **Output:** Classifies each window as **Bruxism** or **Normal**.
+
+---
+
+## 🖼️ Visual Examples
+
+| Normal Sleep (Relaxed Jaw) | Bruxism Event (Clenching Burst) |
+| :---: | :---: |
+| ![Rest Baseline](outputs/lab_test/sample_rest_baseline.png) | ![Phasic Burst](outputs/lab_test/sample_burst_phasic.png) |
+| *Quiet baseline with minimal energy* | *High-energy burst localized across frequencies* |
 
 ---
 
 ## 📊 Experimental Results
 
 ### 1. Clinical Benchmark (CAP Sleep Database)
-Trained for 30 epochs on GPU (NVIDIA RTX 5000 Ada):
-* **Overall Accuracy:** `97.92%`
-* **Weighted F1-Score:** `0.9792`
-* **Holdout Validation:** 116 / 120 bruxism bursts caught (only 4 missed), 119 / 120 normal epochs confirmed.
+Evaluated on hospital polysomnography records (chin EMG):
+* **Overall Accuracy:** **97.92%**
+* **F1-Score:** **0.9792**
+* **Detection Rate:** Detected 116 out of 120 bruxism bursts (only 4 missed), with 119 out of 120 normal epochs confirmed.
 
-### 2. In-Lab Wearable Sensor Validation (Our Own Sensors)
-To evaluate real-world translational feasibility, we conducted controlled in-lab experimental trials on a subject (`Manu`) using:
-* **STMicroelectronics SensorTile Box Pro (STEVAL-MKBOXPROA):** High-sensitivity QVAR electrostatic biopotential charge-variation sensor positioned on the masseter/chin muscle (EMG) and chest (ECG) at ~240 Hz.
-* **Muse S Headband:** 4-channel frontal/temporal EEG monitoring cortical micro-arousals and jaw clenches.
+### 2. Real-World Wearable Hardware Validation
+Tested in-lab on simulated clenching/grinding protocols using portable wearable hardware:
+* **STMicroelectronics SensorTile Box Pro:** High-sensitivity QVAR electrostatic biopotential sensor on the jaw/chin (~240 Hz).
+* **Muse S Headband:** Frontal/temporal EEG monitoring head and jaw activity.
 
-#### Controlled Simulated Bruxism Protocol:
-* **Phasic Bruxism (Rhythmic Clenching):** Tapping teeth together at 1 Hz for 10 seconds.
-* **Tonic Bruxism (Continuous Clenching):** Sustained isometric clench for 2 to 5 seconds.
-* **Mixed Bruxism (Combined):** Sustained 3s hold followed immediately by rhythmic 1 Hz clenches for 10s.
-* **Lateral Grinding (Side-to-Side):** Smooth horizontal jaw excursion (~2s per cycle) for 10 seconds.
-* **Rest Intervals:** 10-second designated rest periods between every trial (lips closed, teeth apart, jaw relaxed).
-
-#### Zero-Shot Transfer Results on In-Lab Sensor Data (Trial 1, 120s):
-* **Total Epochs Evaluated:** 60 consecutive 2-second windows
-* **Overall Accuracy:** `80.00%`
-* **Rest Specificity:** `93.55%` (29 / 31 quiet baseline intervals accurately confirmed)
-* **Bruxism Sensitivity:** `65.52%` (19 / 29 simulated clenching windows detected)
-* **Confusion Matrix:**
-  ```text
-  [[TN=29, FP= 2]
-   [FN=10, TP=19]]
-  ```
+#### Wearable Test Results (Zero-Shot Transfer):
+* **Overall Accuracy:** **80.00%**
+* **Rest Specificity:** **93.55%** (29 of 31 resting intervals correctly identified as normal)
+* **Bruxism Sensitivity:** **65.52%** (19 of 29 clenching windows detected)
 
 ![In-Lab Sensor Evaluation Results](outputs/lab_test/lab_evaluation_results.png)
 
-> **Key Finding:** CWT time-frequency scalograms successfully translate from clinical PSG to wearable biopotential sensors without requiring manual threshold recalibration, achieving **93.55% specificity** on resting jaw periods.
+> **Key Finding:** The wavelet vision representation transfers effectively from clinical hospital equipment to portable wearable sensors without requiring manual threshold adjustments.
 
 ---
 
@@ -97,47 +72,52 @@ To evaluate real-world translational feasibility, we conducted controlled in-lab
 sleep_bruxism_detection/
 ├── checkpoints/              # Saved model weights (best_model.pth)
 ├── data/
-│   ├── dataset/              # CWT scalogram image dataset (train / val)
-│   └── lab_data/             # In-lab wearable sensor recordings (CSV)
+│   ├── dataset/              # Generated 2D CWT scalogram dataset (train / val)
+│   └── lab_data/             # Wearable sensor test recordings (CSV)
 ├── outputs/
-│   └── lab_test/             # In-lab evaluation figures and sample scalograms
+│   └── lab_test/             # Evaluation plots and sample scalograms
 ├── src/
-│   ├── cwt_transform.py      # Continuous Wavelet Transform & scalogram generation
-│   ├── models.py             # Native PyTorch LSKNet & ResNet architectures
-│   └── preprocessing.py      # Biomedical bandpass, notch, and envelope filters
-├── prepare_capslpdb.py       # Automated CAP Sleep dataset generator
-├── train.py                  # PyTorch GPU training script with cosine annealing
-├── evaluate_demo.py          # Clinical evaluation script & confusion matrix generator
-├── test_lab_sensor_data.py   # In-lab wearable sensor testing & evaluation pipeline
-└── README.md
+│   ├── cwt_transform.py      # Wavelet transform & scalogram image generator
+│   ├── models.py             # LSKNet and ResNet neural network architectures
+│   └── preprocessing.py      # Bandpass, notch, and envelope signal filters
+├── prepare_capslpdb.py       # Downloads & prepares clinical CAP Sleep data
+├── train.py                  # Model training script (PyTorch)
+├── evaluate_demo.py          # Clinical evaluation & confusion matrix generator
+├── test_lab_sensor_data.py   # Wearable sensor testing & evaluation pipeline
+└── requirements.txt          # Python dependencies
 ```
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Installation
+### 1. Setup Environment
 ```bash
+# Clone the repository
 git clone https://github.com/shwetamjohn/sleep-bruxism-detection.git
 cd sleep-bruxism-detection
+
+# Create and activate virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\Activate.ps1
+source venv/bin/activate       # On Windows: .\venv\Scripts\Activate.ps1
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Run In-Lab Sensor Evaluation
-To test the pipeline on our in-lab wearable sensor recordings:
+### 2. Test on Wearable Sensor Data
+Run the evaluation pipeline on sample in-lab sensor recordings:
 ```bash
 python test_lab_sensor_data.py
 ```
-This generates the full diagnostic chart and timeline at `outputs/lab_test/lab_evaluation_results.png`.
+This generates the diagnostic chart and timeline at `outputs/lab_test/lab_evaluation_results.png`.
 
 ### 3. Train on Clinical Dataset
 ```bash
-# Build CWT Scalogram dataset from CAP Sleep Database
+# Prepare CWT scalograms from CAP Sleep Database
 python prepare_capslpdb.py --subjects brux1 brux2 --max_epochs 300
 
-# Train Native PyTorch LSKNet
+# Train the LSKNet model
 python train.py --model_name lsknet_tiny --epochs 30
 ```
 
@@ -148,7 +128,8 @@ python evaluate_demo.py --checkpoint checkpoints/best_model.pth --model_name lsk
 
 ---
 
-## 🔮 Future Extensions
-* **Multi-Subject In-Lab Trials:** Expanding in-lab sensor recordings across a diverse cohort of volunteers under awake and sleeping conditions.
-* **Multimodal Early Fusion:** Combining QVAR EMG with Muse EEG spectral bands (Alpha, Beta, Gamma) and ECG heart-rate variability.
-* **Edge Deployment:** Quantizing LSKNet (INT8/TensorRT) to run in real time directly on embedded edge devices for smart mouthguards and biofeedback alerting.
+## 🔮 Future Improvements
+
+* **Multi-Subject In-Lab Trials:** Expanding wearable trials across more participants during overnight sleep.
+* **Multimodal Sensor Fusion:** Combining chin biopotentials with EEG sleep bands and heart rate variability (ECG).
+* **Edge Device Deployment:** Quantizing LSKNet (INT8) for real-time biofeedback alerts on smart mouthguards or headbands.
